@@ -149,6 +149,19 @@ const OPENING_FAMILY_SYNONYMS = {
   // Grunfeld without umlaut
   'grunfeld': 'Grünfeld',
   'neo grunfeld': 'Neo Grunfeld',
+  // King's/Queen's variants without apostrophes
+  'kings indian defense': "King's Indian Defense",
+  'kings indian attack': "King's Indian Attack",
+  'kings fianchetto opening': "King's Fianchetto",
+  'kings fianchetto': "King's Fianchetto",
+  'queens indian defense': "Queen's Indian",
+  'queens indian': "Queen's Indian",
+  // Reversed Sicilian is an English Opening family
+  'reversed sicilian': 'English',
+  // St. George Defense maps to Owen's Defense
+  'st george defense': 'Owen',
+  'st. george defense': 'Owen',
+  'saint george defense': 'Owen',
   // Kings Pawn variations
   "king's pawn opening": "King's Pawn",
   // Van 't Kruijs variants
