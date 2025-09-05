@@ -826,8 +826,12 @@ function parseMovesWithClocks(movesText) {
   const nagsCleaned = commentsCleaned.replace(/\$\d+/g, ' ');
   // 3) Remove simple parentheses used for variations (shallow)
   const parenCleaned = nagsCleaned.replace(/[()]/g, ' ');
-  // 4) Normalize spaces
-  const tokens = parenCleaned.replace(/\s+/g, ' ').trim().split(' ');
+  // 4) Normalize spaces and tokenize while preserving clock comments as single tokens
+  //    Token pattern: either a complete clock comment {[%clk ...]} OR a non-space sequence
+  const tokens = (parenCleaned
+    .replace(/\s+/g, ' ')
+    .trim()
+    .match(/\{\[%\s*clk\s+[^}]+\]\}|[^\s]+/g)) || [];
 
   // SAN validation regex (covers pieces, disambiguation, captures, promotions, checks/mates, castling)
   const SAN_REGEX = /^(?:O-O(?:-O)?[+#]?|[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?|[a-h][1-8](?:=[QRBN])?[+#]?)(?:[!?]{1,2})?$/;
@@ -837,7 +841,8 @@ function parseMovesWithClocks(movesText) {
   let ply = 0;
   let maxFullMove = 0;
 
-  const isMoveNumber = t => /^(\d+)\.(\.{2})?$/.test(t);
+  // Support "1." and black move markers "1.." or "1..."
+  const isMoveNumber = t => /^(\d+)\.(\.{2,3})?$/.test(t);
   const isClockTag = t => /^\{\[%\s*clk\s+[^}]+\]\}$/.test(t);
   const isResultTok = t => /^(1-0|0-1|1\/2-1\/2|\*)$/.test(t);
   const isSAN = t => SAN_REGEX.test(t);
@@ -847,7 +852,7 @@ function parseMovesWithClocks(movesText) {
     if (!tok) continue;
 
     if (isMoveNumber(tok)) {
-      const m = tok.match(/^(\d+)\.(\.{2})?$/);
+      const m = tok.match(/^(\d+)\.(\.{2,3})?$/);
       moveNumber = Number(m[1]);
       if (moveNumber > maxFullMove) maxFullMove = moveNumber;
       side = m[2] ? 'b' : 'w';
