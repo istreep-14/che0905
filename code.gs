@@ -13,7 +13,8 @@ const MONTH = 6;
  */
 const CHESS_COM_API_HEADERS = [
   'Game URL', 'Game FEN', 'Start Time', 'End Time', 'Start Time Formatted', 'End Time Formatted',
-  'Time Control', 'Time Class', 'Rules', 'ECO Opening', 'Rated', 'Tournament URL', 'Match URL',
+  'Time Control', 'Base Time', 'Increment', 'Correspondence Length (days)', 'Time Class', 'Rules',
+  'Format', 'ECO Opening', 'Rated', 'Tournament URL', 'Match URL',
   'White Username', 'White Rating', 'White Result', 'White Profile URL', 'White UUID', 'White Country',
   'Black Username', 'Black Rating', 'Black Result', 'Black Profile URL', 'Black UUID', 'Black Country',
   'White Accuracy', 'Black Accuracy', 'Initial Setup', 'PGN'
@@ -160,10 +161,53 @@ function processGameRow(game, pgnData, headers) {
   const ecoOpening = safeGet(game, 'eco', '') || (pgnData.headers.Opening || pgnData.headers.ECO || '');
 
   // Complete Chess.com API data extraction
+  // Compute Base Time (minutes), Increment (seconds), Correspondence Length (days), and Format
+  const timeControl = safeGet(game, 'time_control', '');
+  const timeClass = safeGet(game, 'time_class', '');
+  const rules = safeGet(game, 'rules', '');
+
+  let baseTimeMinutes = '';
+  let incrementSeconds = '';
+  let correspondenceDays = '';
+
+  if (typeof timeControl === 'string' && timeControl.includes('/')) {
+    // Daily/correspondence format like "1/86400" => 1 move per 86400 seconds
+    const parts = timeControl.split('/');
+    const secondsPerMove = parts.length > 1 ? Number(parts[1]) : NaN;
+    if (!isNaN(secondsPerMove) && secondsPerMove > 0) {
+      correspondenceDays = secondsPerMove / 86400;
+    }
+  } else if (typeof timeControl === 'string' && timeControl.includes('+')) {
+    const [baseStr, incStr] = timeControl.split('+');
+    const baseSeconds = Number(baseStr);
+    const incSeconds = Number(incStr);
+    if (!isNaN(baseSeconds)) baseTimeMinutes = baseSeconds / 60;
+    if (!isNaN(incSeconds)) incrementSeconds = incSeconds;
+    if (baseTimeMinutes !== '' && incrementSeconds === '') incrementSeconds = 0;
+  } else {
+    const baseSeconds = Number(timeControl);
+    if (!isNaN(baseSeconds) && baseSeconds > 0) {
+      baseTimeMinutes = baseSeconds / 60;
+      incrementSeconds = 0;
+    }
+  }
+
+  const toTitle = s => (s && typeof s === 'string' && s.length) ? (s.charAt(0).toUpperCase() + s.slice(1)) : '';
+  let formatDisplay = '';
+  if (rules === 'chess' || rules === '' || rules == null) {
+    // Same as time class for standard chess
+    formatDisplay = toTitle(timeClass);
+  } else if (rules === 'chess960') {
+    formatDisplay = (timeClass === 'daily') ? 'Daily 960' : 'Live 960';
+  } else {
+    // Other variants are live-only per spec; show variant name
+    formatDisplay = toTitle(rules);
+  }
+
   const apiData = [
     safeGet(game, 'url'), safeGet(game, 'fen'), safeGet(game, 'start_time'), safeGet(game, 'end_time'),
-    startTimeFormatted, endTimeFormatted, safeGet(game, 'time_control'), safeGet(game, 'time_class'),
-    safeGet(game, 'rules'), ecoOpening, safeGet(game, 'rated'), safeGet(game, 'tournament'),
+    startTimeFormatted, endTimeFormatted, timeControl, baseTimeMinutes, incrementSeconds, correspondenceDays,
+    timeClass, rules, formatDisplay, ecoOpening, safeGet(game, 'rated'), safeGet(game, 'tournament'),
     safeGet(game, 'match'), safeGet(game, 'white.username'), safeGet(game, 'white.rating'),
     safeGet(game, 'white.result'), safeGet(game, 'white.@id'), safeGet(game, 'white.uuid'),
     safeGet(game, 'white.country'), safeGet(game, 'black.username'), safeGet(game, 'black.rating'),
@@ -259,6 +303,11 @@ function formatColumns(sheet, headers, numRows) {
   // Format accuracy columns
   formatColumn('White Accuracy', '0.0%');
   formatColumn('Black Accuracy', '0.0%');
+
+  // Format new time control derived columns
+  formatColumn('Base Time', '#,##0.00');
+  formatColumn('Increment', '#,##0');
+  formatColumn('Correspondence Length (days)', '#,##0.00');
   
   // Format move count
   formatColumn('PGN_Move_Count', '#,##0');
