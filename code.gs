@@ -140,34 +140,53 @@ function processAllGames(games) {
 function processGameRow(game, pgnData, headers) {
   const safeGet = (obj, path, defaultValue = '') => {
     try {
-      return path.split('.').reduce((current, key) => current && current[key], obj) || defaultValue;
+      const value = path.split('.').reduce((current, key) => current && current[key], obj);
+      return value == null ? defaultValue : value;
     } catch {
       return defaultValue;
     }
   };
-  
+
   const startTimeFormatted = game.start_time ? new Date(game.start_time * 1000).toLocaleString() : '';
   const endTimeFormatted = game.end_time ? new Date(game.end_time * 1000).toLocaleString() : '';
-  
+
+  // Scale accuracies to 0–1 for percentage formatting
+  const whiteAccRaw = safeGet(game, 'accuracies.white', '');
+  const blackAccRaw = safeGet(game, 'accuracies.black', '');
+  const whiteAccuracy = whiteAccRaw === '' ? '' : Number(whiteAccRaw) / 100;
+  const blackAccuracy = blackAccRaw === '' ? '' : Number(blackAccRaw) / 100;
+
+  // ECO/Opening fallback
+  const ecoOpening = safeGet(game, 'eco', '') || (pgnData.headers.Opening || pgnData.headers.ECO || '');
+
   // Complete Chess.com API data extraction
   const apiData = [
     safeGet(game, 'url'), safeGet(game, 'fen'), safeGet(game, 'start_time'), safeGet(game, 'end_time'),
     startTimeFormatted, endTimeFormatted, safeGet(game, 'time_control'), safeGet(game, 'time_class'),
-    safeGet(game, 'rules'), safeGet(game, 'eco'), safeGet(game, 'rated'), safeGet(game, 'tournament'),
+    safeGet(game, 'rules'), ecoOpening, safeGet(game, 'rated'), safeGet(game, 'tournament'),
     safeGet(game, 'match'), safeGet(game, 'white.username'), safeGet(game, 'white.rating'),
     safeGet(game, 'white.result'), safeGet(game, 'white.@id'), safeGet(game, 'white.uuid'),
     safeGet(game, 'white.country'), safeGet(game, 'black.username'), safeGet(game, 'black.rating'),
     safeGet(game, 'black.result'), safeGet(game, 'black.@id'), safeGet(game, 'black.uuid'),
-    safeGet(game, 'black.country'), safeGet(game, 'accuracies.white'), safeGet(game, 'accuracies.black'),
+    safeGet(game, 'black.country'), whiteAccuracy, blackAccuracy,
     safeGet(game, 'initial_setup'), safeGet(game, 'pgn')
   ];
-  
-  // Complete PGN header data extraction
-  const pgnHeaderData = ALL_PGN_HEADERS.map(header => pgnData.headers[header] || '');
-  
+
+  // Complete PGN header data extraction with date/time coercion
+  const pgnHeaderData = ALL_PGN_HEADERS.map(header => {
+    const val = pgnData.headers[header] || '';
+    if (header === 'Date' || header === 'EventDate' || header === 'UTCDate') {
+      return parsePgnDate(val);
+    }
+    if (header === 'Time' || header === 'UTCTime' || header === 'StartTime' || header === 'EndTime') {
+      return parsePgnTime(val);
+    }
+    return val;
+  });
+
   // PGN parsed data
   const pgnDataArray = [pgnData.moves, pgnData.moveCount, pgnData.gameOutcome];
-  
+
   return [...apiData, ...pgnHeaderData, ...pgnDataArray];
 }
 
@@ -342,6 +361,28 @@ function parsePGN(pgnString) {
 }
 
 /**
+ * Helpers to convert PGN date/time strings into Date objects for formatting
+ */
+function parsePgnDate(value) {
+  if (!value || value === '????.??.??') return '';
+  const parts = (value || '').split('.');
+  const year = Number(parts[0]);
+  const month = Math.max(1, Number(parts[1] || '1')) - 1;
+  const day = Math.max(1, Number(parts[2] || '1'));
+  if (!year || isNaN(year)) return '';
+  return new Date(year, month, day);
+}
+
+function parsePgnTime(value) {
+  if (!value || value === '??:??:??') return '';
+  const parts = (value || '').split(':');
+  const hours = Number(parts[0] || '0');
+  const minutes = Number(parts[1] || '0');
+  const seconds = Number(parts[2] || '0');
+  return new Date(Date.UTC(1970, 0, 1, hours, minutes, seconds));
+}
+
+/**
  * Get available archives for the configured player
  */
 function getAvailableArchives() {
@@ -361,6 +402,49 @@ function getAvailableArchives() {
   } catch (error) {
     Logger.log(`Error fetching archives: ${error.toString()}`);
     return [];
+  }
+}
+
+/**
+ * Fetch all archives for the configured player and populate the sheet
+ */
+function fetchAllArchivesForUser() {
+  try {
+    const archives = getAvailableArchives();
+    if (!archives.length) {
+      Browser.msgBox('Info', `No archives found for ${USERNAME}`, Browser.Buttons.OK);
+      return;
+    }
+
+    const allGames = [];
+    archives.forEach(url => {
+      try {
+        const res = UrlFetchApp.fetch(url);
+        if (res.getResponseCode() !== 200) return;
+        const data = JSON.parse(res.getContentText());
+        if (data.games && data.games.length) {
+          allGames.push(...data.games);
+        }
+        Utilities.sleep(150);
+      } catch (innerErr) {
+        Logger.log(`Failed to fetch archive ${url}: ${innerErr}`);
+      }
+    });
+
+    if (!allGames.length) {
+      Browser.msgBox('Info', 'No games found across all archives', Browser.Buttons.OK);
+      return;
+    }
+
+    const sheet = setupSheet();
+    const { headers, gameRows } = processAllGames(allGames);
+    writeDataToSheet(sheet, headers, gameRows);
+
+    Browser.msgBox('Success', `Loaded ${allGames.length} games from ${archives.length} archives`, Browser.Buttons.OK);
+    Logger.log(`Successfully fetched ${allGames.length} games across ${archives.length} archives for ${USERNAME}`);
+  } catch (error) {
+    Logger.log(`Error fetching all archives: ${error.toString()}`);
+    Browser.msgBox('Error', `Failed to fetch all archives: ${error.toString()}`, Browser.Buttons.OK);
   }
 }
 
