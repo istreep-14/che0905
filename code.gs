@@ -267,10 +267,11 @@ function processAllGames(games) {
   // Sort by end time ascending to enable forward-fill by time
   rowObjs.sort((a, b) => (a.endTime || 0) - (b.endTime || 0));
 
-  // Collect unique formats encountered
-  const formatsSet = new Set();
-  rowObjs.forEach(o => { if (o.formatDisplay) formatsSet.add(o.formatDisplay); });
-  const formats = Array.from(formatsSet);
+  // Collect unique formats encountered and ensure default formats are present
+  const DEFAULT_FORMATS = ['Bullet', 'Blitz', 'Rapid', 'Daily', 'Live 960', 'Daily 960'];
+  const encountered = [];
+  rowObjs.forEach(o => { if (o.formatDisplay && !encountered.includes(o.formatDisplay)) encountered.push(o.formatDisplay); });
+  const formats = Array.from(new Set([...DEFAULT_FORMATS, ...encountered]));
 
   // Build dynamic rating headers for each format
   const toHeaderSafe = f => `My_Rating_${String(f).replace(/\s+/g, '_')}`;
@@ -321,30 +322,7 @@ function processAllGames(games) {
     rebuiltRows.push([...basePart, ...ratingValuesBefore, ...newPerspective]);
   }
 
-  // Backfill leading blanks with first known rating per format to avoid blanks
-  for (let f = 0; f < formats.length; f++) {
-    // Find first non-empty value in this rating column
-    let firstVal = '';
-    for (let r = 0; r < rebuiltRows.length; r++) {
-      const colIndex = baseCount + f;
-      const cell = rebuiltRows[r][colIndex];
-      if (cell !== '' && cell != null) {
-        firstVal = cell;
-        break;
-      }
-    }
-    if (firstVal !== '') {
-      for (let r = 0; r < rebuiltRows.length; r++) {
-        const colIndex = baseCount + f;
-        if (rebuiltRows[r][colIndex] === '' || rebuiltRows[r][colIndex] == null) {
-          rebuiltRows[r][colIndex] = firstVal;
-        } else {
-          // Once we hit first non-empty, the rest are already filled by forward-fill
-          break;
-        }
-      }
-    }
-  }
+  // Do not backfill earlier rows with later ratings; leave blanks until first occurrence per format
 
   const allHeaders = [...CHESS_COM_API_HEADERS, ...pgnHeaders, ...pgnDataHeaders, ...ratingHeaders, ...PERSPECTIVE_HEADERS];
 
