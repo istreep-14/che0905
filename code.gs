@@ -370,8 +370,28 @@ function processGameRow(game, pgnData, headers) {
     }
   };
 
-  const startTimeFormatted = game.start_time ? new Date(game.start_time * 1000).toLocaleString() : '';
-  const endTimeFormatted = game.end_time ? new Date(game.end_time * 1000).toLocaleString() : '';
+  // Derive start time from end time and PGN Start/End time difference when start_time is missing
+  const pgnStartStr = (pgnData && pgnData.headers && pgnData.headers['StartTime']) ? String(pgnData.headers['StartTime']) : '';
+  const pgnEndStr = (pgnData && pgnData.headers && pgnData.headers['EndTime']) ? String(pgnData.headers['EndTime']) : '';
+  let pgnDeltaSec = '';
+  if (pgnStartStr && pgnEndStr) {
+    const startSec = parseClockToSeconds(pgnStartStr);
+    const endSec = parseClockToSeconds(pgnEndStr);
+    if (typeof startSec === 'number' && typeof endSec === 'number') {
+      let delta = endSec - startSec;
+      if (delta < 0) delta += 24 * 3600; // handle crossing midnight
+      pgnDeltaSec = delta;
+    }
+  }
+
+  const endTimeEpoch = safeGet(game, 'end_time', '');
+  let startTimeEpoch = safeGet(game, 'start_time', '');
+  if ((startTimeEpoch === '' || startTimeEpoch == null) && endTimeEpoch !== '' && typeof pgnDeltaSec === 'number') {
+    startTimeEpoch = Number(endTimeEpoch) - pgnDeltaSec;
+  }
+
+  const startTimeFormatted = (startTimeEpoch !== '' && startTimeEpoch != null) ? new Date(Number(startTimeEpoch) * 1000) : '';
+  const endTimeFormatted = (endTimeEpoch !== '' && endTimeEpoch != null) ? new Date(Number(endTimeEpoch) * 1000) : '';
 
   // Scale accuracies to 0–1 for percentage formatting
   const whiteAccRaw = safeGet(game, 'accuracies.white', '');
@@ -427,7 +447,7 @@ function processGameRow(game, pgnData, headers) {
   }
 
   const apiData = [
-    safeGet(game, 'url'), safeGet(game, 'fen'), safeGet(game, 'start_time'), safeGet(game, 'end_time'),
+    safeGet(game, 'url'), safeGet(game, 'fen'), startTimeEpoch, endTimeEpoch,
     startTimeFormatted, endTimeFormatted, timeControl, baseTimeMinutes, incrementSeconds, correspondenceDays,
     timeClass, rules, formatDisplay, ecoOpening, safeGet(game, 'rated'), safeGet(game, 'tournament'),
     safeGet(game, 'match'), safeGet(game, 'white.username'), safeGet(game, 'white.rating'),
@@ -450,8 +470,8 @@ function processGameRow(game, pgnData, headers) {
     return val;
   });
 
-  // Derive opening family using provided mapping
-  const openingText = (pgnData.headers.Opening || pgnData.headers.ECO || ecoOpening || '').toString();
+  // Derive opening family using Chess.com ECO Opening text
+  const openingText = (ecoOpening || '').toString();
   const { familyName, familyUrl } = getOpeningFamily(openingText);
 
   // Parse moves and clocks; recompute ply/move counts
@@ -493,9 +513,13 @@ function processGameRow(game, pgnData, headers) {
   else if (whiteResult && blackResult && whiteResult === blackResult) termination = whiteResult;
 
   // PGN parsed data
+  const compactMoves = parsedMoves.moves.map(m => {
+    const timeStr = (m.clockSeconds !== '' && m.clockSeconds != null) ? formatSecondsToHmsTenths(m.clockSeconds) : '';
+    return [m.ply, m.moveNumber, m.side, m.san, timeStr];
+  });
   const pgnDataArray = [
     pgnData.moves,
-    JSON.stringify(parsedMoves.moves),
+    JSON.stringify(compactMoves),
     humanMoves,
     plyCount,
     moveCount,
@@ -901,6 +925,24 @@ function parseClockToSeconds(text) {
   }
   if (isNaN(hours) || isNaN(minutes) || isNaN(seconds)) return '';
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+// Format seconds to H:MM:SS.d where tenths shown if fractional
+function formatSecondsToHmsTenths(totalSeconds) {
+  if (totalSeconds === '' || totalSeconds == null || isNaN(totalSeconds)) return '';
+  const hasFraction = Math.abs(totalSeconds - Math.trunc(totalSeconds)) > 0.0001;
+  const tenths = Math.round((totalSeconds % 1) * 10);
+  const whole = Math.floor(totalSeconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const seconds = whole % 60;
+  const h = String(hours);
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(seconds).padStart(2, '0');
+  if (hasFraction && tenths > 0) {
+    return `${h}:${mm}:${ss}.${tenths}`;
+  }
+  return `${h}:${mm}:${ss}`;
 }
 
 /**
