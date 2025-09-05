@@ -132,6 +132,48 @@ const OPENING_FAMILY_MAP = {
   "Anderssen's Opening": 'https://www.chess.com/openings/Anderssen-Opening'
 };
 
+// Synonyms -> Canonical family name (normalized keys)
+const OPENING_FAMILY_SYNONYMS = {
+  // Modern Defense synonyms
+  'modern defense': 'Modern w/1.e4',
+  'modern': 'Modern w/1.e4',
+  // Reti
+  'reti': 'Réti',
+  // Petrov/Petrovs spelling
+  "petrov's defense": "Petrov's Defense",
+  'petrov defense': 'Petrov',
+  // Giuoco Piano without hyphen
+  'giuoco piano': 'Giuoco-Piano',
+  // Ruy Lopez without accent
+  'ruy lopez': 'Ruy López',
+  // Grunfeld without umlaut
+  'grunfeld': 'Grünfeld',
+  'neo grunfeld': 'Neo Grunfeld',
+  // Kings Pawn variations
+  "king's pawn opening": "King's Pawn",
+  // Van 't Kruijs variants
+  "van t kruijs": "Van 't Kruijs Opening",
+  "van't kruijs": "Van 't Kruijs Opening",
+  // Four Knights variations
+  'four knights': 'Four Knights Game',
+  // Scotch without Game
+  'scotch': 'Scotch Game',
+  // Queen's Pawn/Gambit common variants
+  "queens pawn": "Queen's Pawn",
+  "queens gambit": "Queen's Gambit",
+  // Kings Gambit
+  "kings gambit": "King's Gambit",
+  // Indian Game variants
+  'old indian defense': 'Old Indian',
+  'bogo indian': 'Bogo-Indian',
+  // Sicilian variants
+  'alapin': 'Alapin Sicilian',
+  'closed sicilian defense': 'Closed Sicilian',
+  // Benko/Benoni spellings
+  'benko': 'Benko Gambit',
+  'englund': 'Englund Gambit'
+};
+
 /**
  * Main function to fetch Chess.com data and populate sheet
  */
@@ -765,7 +807,8 @@ function parseMovesWithClocks(movesText) {
   if (!movesText) return result;
 
   // 1) Keep only clock comments; remove all other braces comments
-  const commentsCleaned = movesText.replace(/\{[^}]*\}/g, (m) => (/%clk/.test(m) ? m : ' '));
+  // Accept patterns like {[%clk H:MM:SS(.d)]} or {[%clk M:SS(.d)]}
+  const commentsCleaned = movesText.replace(/\{[^}]*\}/g, (m) => (/\[%\s*clk\b/.test(m) ? m : ' '));
   // 2) Remove Numeric Annotation Glyphs like $1, $12, etc.
   const nagsCleaned = commentsCleaned.replace(/\$\d+/g, ' ');
   // 3) Remove simple parentheses used for variations (shallow)
@@ -782,7 +825,7 @@ function parseMovesWithClocks(movesText) {
   let maxFullMove = 0;
 
   const isMoveNumber = t => /^(\d+)\.(\.{2})?$/.test(t);
-  const isClockTag = t => /^\{\[%clk\s+[^}]+\]\}$/.test(t);
+  const isClockTag = t => /^\{\[%\s*clk\s+[^}]+\]\}$/.test(t);
   const isResultTok = t => /^(1-0|0-1|1\/2-1\/2|\*)$/.test(t);
   const isSAN = t => SAN_REGEX.test(t);
 
@@ -808,7 +851,8 @@ function parseMovesWithClocks(movesText) {
     let clockSeconds = '';
     if (i + 1 < tokens.length && isClockTag(tokens[i + 1])) {
       clock = tokens[i + 1].slice(1, -1); // remove braces
-      const clkMatch = clock.match(/%clk\s+([0-9]+:[0-9]{2}:[0-9]{2}(?:\.[0-9])?|[0-9]+:[0-9]{2}(?:\.[0-9])?)/);
+      // Capture H:MM:SS(.d) or M:SS(.d)
+      const clkMatch = clock.match(/%\s*clk\s+([0-9]+:[0-9]{2}:[0-9]{2}(?:\.[0-9])?|[0-9]+:[0-9]{2}(?:\.[0-9])?)/);
       if (clkMatch) {
         clockSeconds = parseClockToSeconds(clkMatch[1]);
         if (typeof clockSeconds === 'number') {
@@ -889,7 +933,10 @@ function resultToScore(result) {
 function parseClockToSeconds(text) {
   // Accept H:MM:SS(.d) or M:SS(.d)
   if (!text) return '';
-  const parts = text.split(':');
+  const cleaned = String(text).trim();
+  const frac = cleaned.includes('.') ? Number(cleaned.slice(cleaned.lastIndexOf('.') + 1)) / 10 : 0;
+  const base = cleaned.replace(/\.[0-9]$/, '');
+  const parts = base.split(':');
   let hours = 0, minutes = 0, seconds = 0;
   if (parts.length === 3) {
     hours = Number(parts[0]);
@@ -902,7 +949,7 @@ function parseClockToSeconds(text) {
     return '';
   }
   if (isNaN(hours) || isNaN(minutes) || isNaN(seconds)) return '';
-  return hours * 3600 + minutes * 60 + seconds;
+  return hours * 3600 + minutes * 60 + seconds + frac;
 }
 
 // Format seconds to H:MM:SS.d where tenths shown if fractional
@@ -946,14 +993,44 @@ function computeMaterialImbalance(fen) {
  */
 function getOpeningFamily(openingText) {
   const map = OPENING_FAMILY_MAP;
-  const normalized = (openingText || '').toLowerCase();
+
+  // Normalize helper: lower, strip diacritics, remove punctuation, collapse spaces
+  const normalize = (s) => {
+    return String(s || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[_'`’‑–—-]+/g, ' ')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const textNorm = normalize(openingText);
+
+  // 1) Try synonyms first
+  const synonymEntries = Object.keys(OPENING_FAMILY_SYNONYMS || {}).map(k => ({
+    keyNorm: normalize(k),
+    canonical: OPENING_FAMILY_SYNONYMS[k]
+  }));
+  for (const entry of synonymEntries) {
+    if (entry.keyNorm && textNorm.includes(entry.keyNorm)) {
+      const canonical = entry.canonical;
+      if (canonical && map[canonical]) {
+        return { familyName: canonical, familyUrl: map[canonical] };
+      }
+    }
+  }
+
+  // 2) Direct map keys with normalization
   for (const key in map) {
     if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
-    const keyNorm = key.toLowerCase();
-    if (normalized.includes(keyNorm)) {
+    const keyNorm = normalize(key);
+    if (keyNorm && textNorm.includes(keyNorm)) {
       return { familyName: key, familyUrl: map[key] };
     }
   }
+
   return { familyName: '', familyUrl: '' };
 }
 
