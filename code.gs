@@ -58,7 +58,8 @@ const ALL_PGN_HEADERS = [
 const PERSPECTIVE_HEADERS = [
   'My_Color',
   'My_Result',
-  'Termination'
+  'Termination',
+  'My_Rating_Change'
 ];
 
 // Opening family mapping to Chess.com URLs
@@ -215,20 +216,145 @@ function processAllGames(games) {
     'Black_Clock_Min_Sec',
     'First_Sub5s_Ply'
   ];
-  const allHeaders = [...CHESS_COM_API_HEADERS, ...pgnHeaders, ...pgnDataHeaders, ...PERSPECTIVE_HEADERS];
-  
+
+  // Build base rows and collect metadata for rating computation
+  const rowObjs = games.map(game => {
+    const pgnData = parsePGN(game.pgn);
+    const baseRow = processGameRow(game, pgnData, []);
+
+    // Derive format display (same logic as in processGameRow)
+    const timeControl = (game && game.time_control) || '';
+    const timeClass = (game && game.time_class) || '';
+    const rules = (game && game.rules) || '';
+    const toTitle = s => (s && typeof s === 'string' && s.length) ? (s.charAt(0).toUpperCase() + s.slice(1)) : '';
+    let formatDisplay = '';
+    if (rules === 'chess' || rules === '' || rules == null) {
+      formatDisplay = toTitle(timeClass);
+    } else if (rules === 'chess960') {
+      formatDisplay = (timeClass === 'daily') ? 'Daily 960' : 'Live 960';
+    } else {
+      formatDisplay = toTitle(rules);
+    }
+
+    // Determine my color and pre-rating
+    const me = (USERNAME || '').toLowerCase();
+    const whiteUser = ((game && game.white && game.white.username) || '').toLowerCase();
+    const blackUser = ((game && game.black && game.black.username) || '').toLowerCase();
+    const myColor = me && whiteUser && me === whiteUser ? 'White' : (me && blackUser && me === blackUser ? 'Black' : '');
+    const preRating = myColor === 'White' ? Number((game && game.white && game.white.rating) || '')
+                     : myColor === 'Black' ? Number((game && game.black && game.black.rating) || '')
+                     : '';
+
+    // Rating diff from PGN headers
+    let ratingDiff = '';
+    if (myColor === 'White') {
+      const diffRaw = pgnData.headers['WhiteRatingDiff'];
+      if (diffRaw != null && diffRaw !== '') ratingDiff = Number(String(diffRaw).replace('+', ''));
+    } else if (myColor === 'Black') {
+      const diffRaw = pgnData.headers['BlackRatingDiff'];
+      if (diffRaw != null && diffRaw !== '') ratingDiff = Number(String(diffRaw).replace('+', ''));
+    }
+
+    const afterRating = (typeof preRating === 'number' && !isNaN(preRating) && typeof ratingDiff === 'number' && !isNaN(ratingDiff))
+      ? (preRating + ratingDiff)
+      : (typeof preRating === 'number' && !isNaN(preRating) ? preRating : '');
+
+    const endTime = Number((game && game.end_time) || 0);
+
+    return { row: baseRow, endTime, formatDisplay, myColor, preRating, ratingDiff, afterRating };
+  });
+
+  // Sort by end time ascending to enable forward-fill by time
+  rowObjs.sort((a, b) => (a.endTime || 0) - (b.endTime || 0));
+
+  // Collect unique formats encountered
+  const formatsSet = new Set();
+  rowObjs.forEach(o => { if (o.formatDisplay) formatsSet.add(o.formatDisplay); });
+  const formats = Array.from(formatsSet);
+
+  // Build dynamic rating headers for each format
+  const toHeaderSafe = f => `My_Rating_${String(f).replace(/\s+/g, '_')}`;
+  const ratingHeaders = formats.map(toHeaderSafe);
+
+  // Rebuild rows to insert rating columns (forward-filled) and rating change in perspective
+  const rebuiltRows = [];
+  const lastKnownByFormat = {};
+
+  const apiHeaderCount = CHESS_COM_API_HEADERS.length;
+  const pgnHeaderCount = ALL_PGN_HEADERS.length;
+  const baseCount = apiHeaderCount + pgnHeaderCount + pgnDataHeaders.length;
+
+  for (const obj of rowObjs) {
+    const basePart = obj.row.slice(0, baseCount);
+    const perspectivePart = obj.row.slice(baseCount); // [My_Color, My_Result, Termination]
+
+    // Values before applying this game's update (most recent before time-wise)
+    const ratingValuesBefore = formats.map(fmt => {
+      const prev = lastKnownByFormat[fmt];
+      return (typeof prev === 'number' && !isNaN(prev)) ? prev : '';
+    });
+
+    // Compute this game's format overrides and rating change
+    let ratingChange = '';
+    if (obj.formatDisplay) {
+      const fmtIndex = formats.indexOf(obj.formatDisplay);
+      if (fmtIndex >= 0) {
+        // Rating change equals PGN rating diff when available; else derive from last known
+        if (typeof obj.ratingDiff === 'number' && !isNaN(obj.ratingDiff)) {
+          ratingChange = obj.ratingDiff;
+        } else {
+          const prev = lastKnownByFormat[obj.formatDisplay];
+          if ((typeof obj.afterRating === 'number' && !isNaN(obj.afterRating)) && (typeof prev === 'number' && !isNaN(prev))) {
+            ratingChange = obj.afterRating - prev;
+          }
+        }
+
+        // Override the current format with after-game rating
+        if (typeof obj.afterRating === 'number' && !isNaN(obj.afterRating)) {
+          ratingValuesBefore[fmtIndex] = obj.afterRating;
+          lastKnownByFormat[obj.formatDisplay] = obj.afterRating;
+        }
+      }
+    }
+
+    const newPerspective = [...perspectivePart, ratingChange];
+    rebuiltRows.push([...basePart, ...ratingValuesBefore, ...newPerspective]);
+  }
+
+  // Backfill leading blanks with first known rating per format to avoid blanks
+  for (let f = 0; f < formats.length; f++) {
+    // Find first non-empty value in this rating column
+    let firstVal = '';
+    for (let r = 0; r < rebuiltRows.length; r++) {
+      const colIndex = baseCount + f;
+      const cell = rebuiltRows[r][colIndex];
+      if (cell !== '' && cell != null) {
+        firstVal = cell;
+        break;
+      }
+    }
+    if (firstVal !== '') {
+      for (let r = 0; r < rebuiltRows.length; r++) {
+        const colIndex = baseCount + f;
+        if (rebuiltRows[r][colIndex] === '' || rebuiltRows[r][colIndex] == null) {
+          rebuiltRows[r][colIndex] = firstVal;
+        } else {
+          // Once we hit first non-empty, the rest are already filled by forward-fill
+          break;
+        }
+      }
+    }
+  }
+
+  const allHeaders = [...CHESS_COM_API_HEADERS, ...pgnHeaders, ...pgnDataHeaders, ...ratingHeaders, ...PERSPECTIVE_HEADERS];
+
   Logger.log(`Created comprehensive header set with ${allHeaders.length} columns`);
   Logger.log(`Chess.com API headers: ${CHESS_COM_API_HEADERS.length}`);
   Logger.log(`PGN headers: ${pgnHeaders.length}`);
   Logger.log(`Additional PGN data headers: ${pgnDataHeaders.length}`);
-  
-  // Process game rows with all parsed PGN data
-  const gameRows = games.map(game => {
-    const pgnData = parsePGN(game.pgn);
-    return processGameRow(game, pgnData, allHeaders);
-  });
-  
-  return { headers: allHeaders, gameRows };
+  Logger.log(`Dynamic rating headers: ${ratingHeaders.length}`);
+
+  return { headers: allHeaders, gameRows: rebuiltRows };
 }
 
 /**
@@ -416,12 +542,20 @@ function writeDataToSheet(sheet, headers, gameRows) {
   pgnRange.setBackground('#34a853');
   
   // PGN data headers - Orange
-  const pgnDataCount = headers.length - (apiHeaderCount + pgnHeaderCount + PERSPECTIVE_HEADERS.length);
+  const ratingCount = headers.filter(h => String(h).indexOf('My_Rating_') === 0).length;
+  const pgnDataCount = headers.length - (apiHeaderCount + pgnHeaderCount + ratingCount + PERSPECTIVE_HEADERS.length);
   const pgnDataRange = sheet.getRange(1, apiHeaderCount + pgnHeaderCount + 1, 1, pgnDataCount);
   pgnDataRange.setBackground('#ff9800');
 
+  // Rating-by-format headers - Teal
+  const ratingStart = apiHeaderCount + pgnHeaderCount + pgnDataCount + 1;
+  if (ratingCount > 0) {
+    const ratingRange = sheet.getRange(1, ratingStart, 1, ratingCount);
+    ratingRange.setBackground('#00bcd4');
+  }
+
   // Perspective headers - Purple
-  const perspectiveStart = apiHeaderCount + pgnHeaderCount + pgnDataCount + 1;
+  const perspectiveStart = apiHeaderCount + pgnHeaderCount + pgnDataCount + ratingCount + 1;
   const perspectiveRange = sheet.getRange(1, perspectiveStart, 1, PERSPECTIVE_HEADERS.length);
   perspectiveRange.setBackground('#9c27b0');
   
@@ -519,6 +653,14 @@ function formatColumns(sheet, headers, numRows) {
 
   // Perspective
   formatColumn('My_Result', '0.0');
+  formatColumn('My_Rating_Change', '#,##0');
+
+  // Rating-by-format columns
+  headers.forEach(h => {
+    if (String(h).indexOf('My_Rating_') === 0) {
+      formatColumn(h, '#,##0');
+    }
+  });
   
   Logger.log('Comprehensive column formatting applied');
 }
@@ -620,42 +762,50 @@ function parseMovesWithClocks(movesText) {
   const result = { moves: [], plyCount: 0, whiteCastled: false, blackCastled: false, anyClockUnderFiveSec: false, sub5Count: 0, sub3Count: 0, whiteClockMinSec: '', blackClockMinSec: '', firstSub5Ply: '' };
   if (!movesText) return result;
 
-  // Remove comments other than clock annotations and NAGs; keep SAN + clock tags
-  // Normalize multiple spaces
-  const tokens = movesText
-    .replace(/\{\s*\[%eval[^}]*\]\s*\}/g, ' ') // drop eval annotations if present
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ');
+  // 1) Keep only clock comments; remove all other braces comments
+  const commentsCleaned = movesText.replace(/\{[^}]*\}/g, (m) => (/%clk/.test(m) ? m : ' '));
+  // 2) Remove Numeric Annotation Glyphs like $1, $12, etc.
+  const nagsCleaned = commentsCleaned.replace(/\$\d+/g, ' ');
+  // 3) Remove simple parentheses used for variations (shallow)
+  const parenCleaned = nagsCleaned.replace(/[()]/g, ' ');
+  // 4) Normalize spaces
+  const tokens = parenCleaned.replace(/\s+/g, ' ').trim().split(' ');
+
+  // SAN validation regex (covers pieces, disambiguation, captures, promotions, checks/mates, castling)
+  const SAN_REGEX = /^(?:O-O(?:-O)?[+#]?|[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?|[a-h][1-8](?:=[QRBN])?[+#]?)(?:[!?]{1,2})?$/;
 
   let moveNumber = 0;
   let side = 'w';
   let ply = 0;
+  let maxFullMove = 0;
 
   const isMoveNumber = t => /^(\d+)\.(\.{2})?$/.test(t);
   const isClockTag = t => /^\{\[%clk\s+[^}]+\]\}$/.test(t);
+  const isResultTok = t => /^(1-0|0-1|1\/2-1\/2|\*)$/.test(t);
+  const isSAN = t => SAN_REGEX.test(t);
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (!tok) continue;
+
     if (isMoveNumber(tok)) {
       const m = tok.match(/^(\d+)\.(\.{2})?$/);
       moveNumber = Number(m[1]);
+      if (moveNumber > maxFullMove) maxFullMove = moveNumber;
       side = m[2] ? 'b' : 'w';
       continue;
     }
-    if (/^(1-0|0-1|1\/2-1\/2|\*)$/.test(tok)) {
-      break;
-    }
 
-    // tok should be SAN
-    const san = tok;
+    if (isResultTok(tok)) break;
+
+    // Sanity: only accept valid SAN tokens as moves
+    if (!isSAN(tok)) continue;
+
     // Next token may be a clock tag
     let clock = '';
     let clockSeconds = '';
     if (i + 1 < tokens.length && isClockTag(tokens[i + 1])) {
       clock = tokens[i + 1].slice(1, -1); // remove braces
-      // Extract time like 0:03:00.9 or 3:00
       const clkMatch = clock.match(/%clk\s+([0-9]+:[0-9]{2}:[0-9]{2}(?:\.[0-9])?|[0-9]+:[0-9]{2}(?:\.[0-9])?)/);
       if (clkMatch) {
         clockSeconds = parseClockToSeconds(clkMatch[1]);
@@ -665,9 +815,7 @@ function parseMovesWithClocks(movesText) {
             result.sub5Count += 1;
             if (result.firstSub5Ply === '') result.firstSub5Ply = (ply + 1);
           }
-          if (clockSeconds < 3) {
-            result.sub3Count += 1;
-          }
+          if (clockSeconds < 3) result.sub3Count += 1;
           if (side === 'w') {
             if (result.whiteClockMinSec === '' || clockSeconds < result.whiteClockMinSec) result.whiteClockMinSec = clockSeconds;
           } else {
@@ -678,21 +826,26 @@ function parseMovesWithClocks(movesText) {
       i++;
     }
 
+    // Default first move number if omitted
+    if (moveNumber === 0 && side === 'w') moveNumber = 1;
+
     ply += 1;
+    const san = tok;
     const entry = { ply, moveNumber, side, san, clock, clockSeconds };
     result.moves.push(entry);
 
     if (san === 'O-O' || san === 'O-O-O') {
-      if (side === 'w') result.whiteCastled = true;
-      else result.blackCastled = true;
+      if (side === 'w') result.whiteCastled = true; else result.blackCastled = true;
     }
 
-    // Toggle side and increment move number when black finishes
-    if (side === 'w') {
-      side = 'b';
-    } else {
-      side = 'w';
+    // If black just moved, the next white move is the next full-move number (when not explicitly provided)
+    if (side === 'b') {
+      moveNumber += 1;
+      if (moveNumber > maxFullMove) maxFullMove = moveNumber;
     }
+
+    // Toggle side after processing the move
+    side = (side === 'w') ? 'b' : 'w';
   }
 
   result.plyCount = ply;
