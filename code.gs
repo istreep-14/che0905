@@ -54,6 +54,13 @@ const ALL_PGN_HEADERS = [
   'TimeIncrement', 'WhiteTimeLeft', 'BlackTimeLeft'
 ];
 
+// Perspective headers appended at the end of the dataset
+const PERSPECTIVE_HEADERS = [
+  'My_Color',
+  'My_Result',
+  'Termination'
+];
+
 // Opening family mapping to Chess.com URLs
 const OPENING_FAMILY_MAP = {
   'Alekhine': 'https://www.chess.com/openings/Alekhine',
@@ -191,6 +198,7 @@ function processAllGames(games) {
   const pgnDataHeaders = [
     'PGN_Moves',
     'PGN_Moves_With_Clocks',
+    'PGN_Moves_String',
     'PGN_Ply_Count',
     'PGN_Move_Count',
     'PGN_Game_Outcome',
@@ -200,9 +208,14 @@ function processAllGames(games) {
     'Avg_Move_Time_Sec_per_Ply',
     'White_Castled',
     'Black_Castled',
-    'Time_Scramble_Flag'
+    'Time_Scramble_Flag',
+    'Sub5s_Count',
+    'Sub3s_Count',
+    'White_Clock_Min_Sec',
+    'Black_Clock_Min_Sec',
+    'First_Sub5s_Ply'
   ];
-  const allHeaders = [...CHESS_COM_API_HEADERS, ...pgnHeaders, ...pgnDataHeaders];
+  const allHeaders = [...CHESS_COM_API_HEADERS, ...pgnHeaders, ...pgnDataHeaders, ...PERSPECTIVE_HEADERS];
   
   Logger.log(`Created comprehensive header set with ${allHeaders.length} columns`);
   Logger.log(`Chess.com API headers: ${CHESS_COM_API_HEADERS.length}`);
@@ -334,10 +347,30 @@ function processGameRow(game, pgnData, headers) {
   // Material imbalance from final FEN
   const materialImbalance = computeMaterialImbalance(safeGet(game, 'fen', ''));
 
+  // Build human-readable moves string
+  const humanMoves = buildHumanReadableMoves(parsedMoves.moves);
+
+  // Perspective fields
+  const me = (USERNAME || '').toLowerCase();
+  const whiteUser = (safeGet(game, 'white.username', '') || '').toLowerCase();
+  const blackUser = (safeGet(game, 'black.username', '') || '').toLowerCase();
+  const myColor = me && whiteUser && me === whiteUser ? 'White' : (me && blackUser && me === blackUser ? 'Black' : '');
+  const whiteResult = safeGet(game, 'white.result', '');
+  const blackResult = safeGet(game, 'black.result', '');
+  let myResult = '';
+  if (myColor === 'White') myResult = resultToScore(whiteResult);
+  else if (myColor === 'Black') myResult = resultToScore(blackResult);
+  // Termination: if one side is 'win', take the other side's result; if draw, both same -> take that
+  let termination = '';
+  if (whiteResult === 'win' && blackResult) termination = blackResult;
+  else if (blackResult === 'win' && whiteResult) termination = whiteResult;
+  else if (whiteResult && blackResult && whiteResult === blackResult) termination = whiteResult;
+
   // PGN parsed data
   const pgnDataArray = [
     pgnData.moves,
     JSON.stringify(parsedMoves.moves),
+    humanMoves,
     plyCount,
     moveCount,
     pgnData.gameOutcome,
@@ -347,10 +380,17 @@ function processGameRow(game, pgnData, headers) {
     avgPerPly,
     whiteCastled,
     blackCastled,
-    timeScrambleFlag
+    timeScrambleFlag,
+    parsedMoves.sub5Count,
+    parsedMoves.sub3Count,
+    parsedMoves.whiteClockMinSec,
+    parsedMoves.blackClockMinSec,
+    parsedMoves.firstSub5Ply
   ];
 
-  return [...apiData, ...pgnHeaderData, ...pgnDataArray];
+  const perspectiveArray = [myColor, myResult, termination];
+
+  return [...apiData, ...pgnHeaderData, ...pgnDataArray, ...perspectiveArray];
 }
 
 /**
@@ -376,9 +416,14 @@ function writeDataToSheet(sheet, headers, gameRows) {
   pgnRange.setBackground('#34a853');
   
   // PGN data headers - Orange
-  const pgnDataCount = headers.length - (apiHeaderCount + pgnHeaderCount);
+  const pgnDataCount = headers.length - (apiHeaderCount + pgnHeaderCount + PERSPECTIVE_HEADERS.length);
   const pgnDataRange = sheet.getRange(1, apiHeaderCount + pgnHeaderCount + 1, 1, pgnDataCount);
   pgnDataRange.setBackground('#ff9800');
+
+  // Perspective headers - Purple
+  const perspectiveStart = apiHeaderCount + pgnHeaderCount + pgnDataCount + 1;
+  const perspectiveRange = sheet.getRange(1, perspectiveStart, 1, PERSPECTIVE_HEADERS.length);
+  perspectiveRange.setBackground('#9c27b0');
   
   // Write game data
   if (gameRows.length > 0) {
@@ -393,7 +438,7 @@ function writeDataToSheet(sheet, headers, gameRows) {
   sheet.autoResizeColumns(1, headers.length);
   
   Logger.log(`Sheet updated with ${headers.length} columns and ${gameRows.length} rows`);
-  Logger.log('Header sections: API (Blue), PGN (Green), PGN Data (Orange)');
+  Logger.log('Header sections: API (Blue), PGN (Green), PGN Data (Orange), Perspective (Purple)');
 }
 
 /**
@@ -466,6 +511,14 @@ function formatColumns(sheet, headers, numRows) {
 
   // Other numeric columns
   formatColumn('Material_Imbalance', '#,##0');
+  formatColumn('Sub5s_Count', '#,##0');
+  formatColumn('Sub3s_Count', '#,##0');
+  formatColumn('White_Clock_Min_Sec', '#,##0.0');
+  formatColumn('Black_Clock_Min_Sec', '#,##0.0');
+  formatColumn('First_Sub5s_Ply', '#,##0');
+
+  // Perspective
+  formatColumn('My_Result', '0.0');
   
   Logger.log('Comprehensive column formatting applied');
 }
@@ -564,7 +617,7 @@ function parsePgnTime(value) {
  * - plyCount, whiteCastled, blackCastled, anyClockUnderFiveSec
  */
 function parseMovesWithClocks(movesText) {
-  const result = { moves: [], plyCount: 0, whiteCastled: false, blackCastled: false, anyClockUnderFiveSec: false };
+  const result = { moves: [], plyCount: 0, whiteCastled: false, blackCastled: false, anyClockUnderFiveSec: false, sub5Count: 0, sub3Count: 0, whiteClockMinSec: '', blackClockMinSec: '', firstSub5Ply: '' };
   if (!movesText) return result;
 
   // Remove comments other than clock annotations and NAGs; keep SAN + clock tags
@@ -606,8 +659,20 @@ function parseMovesWithClocks(movesText) {
       const clkMatch = clock.match(/%clk\s+([0-9]+:[0-9]{2}:[0-9]{2}(?:\.[0-9])?|[0-9]+:[0-9]{2}(?:\.[0-9])?)/);
       if (clkMatch) {
         clockSeconds = parseClockToSeconds(clkMatch[1]);
-        if (typeof clockSeconds === 'number' && clockSeconds < 5) {
-          result.anyClockUnderFiveSec = true;
+        if (typeof clockSeconds === 'number') {
+          if (clockSeconds < 5) {
+            result.anyClockUnderFiveSec = true;
+            result.sub5Count += 1;
+            if (result.firstSub5Ply === '') result.firstSub5Ply = (ply + 1);
+          }
+          if (clockSeconds < 3) {
+            result.sub3Count += 1;
+          }
+          if (side === 'w') {
+            if (result.whiteClockMinSec === '' || clockSeconds < result.whiteClockMinSec) result.whiteClockMinSec = clockSeconds;
+          } else {
+            if (result.blackClockMinSec === '' || clockSeconds < result.blackClockMinSec) result.blackClockMinSec = clockSeconds;
+          }
         }
       }
       i++;
@@ -632,6 +697,38 @@ function parseMovesWithClocks(movesText) {
 
   result.plyCount = ply;
   return result;
+}
+
+function buildHumanReadableMoves(moves) {
+  if (!moves || !moves.length) return '';
+  const parts = [];
+  let currentMoveNumber = 0;
+  let buffer = '';
+  for (const m of moves) {
+    if (m.moveNumber !== currentMoveNumber) {
+      // flush previous
+      if (buffer) {
+        parts.push(buffer.trim());
+        buffer = '';
+      }
+      currentMoveNumber = m.moveNumber;
+      buffer += `${m.moveNumber}.`;
+      if (m.side === 'b') buffer += '..';
+      buffer += ` ${m.san}`;
+    } else {
+      buffer += ` ${m.san}`;
+    }
+  }
+  if (buffer) parts.push(buffer.trim());
+  return parts.join(' ');
+}
+
+function resultToScore(result) {
+  if (!result) return '';
+  // Chess.com results: win, checkmated, resigned, timeout, stalemate, agreed, repetition, timevsinsufficient, abandoned, other
+  if (result === 'win') return 1;
+  if (result === 'stalemate' || result === 'agreed' || result === 'repetition' || result === 'timevsinsufficient') return 0.5;
+  return 0;
 }
 
 function parseClockToSeconds(text) {
